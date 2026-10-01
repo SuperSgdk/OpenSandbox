@@ -1,0 +1,124 @@
+name: PR 2109 Linux verification
+
+on:
+  push:
+    branches: [validation/pr2109-linux]
+
+permissions:
+  contents: read
+
+jobs:
+  cli-linux:
+    name: CLI quality and full tests (Ubuntu, Python 3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: 889a5e6be15ce6259332e8e04549d805ecf27a2b
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.12.10'
+      - name: Confirm submitted source
+        run: |
+          test "$(git rev-parse HEAD)" = 889a5e6be15ce6259332e8e04549d805ecf27a2b
+          git show --stat --oneline HEAD
+          sha256sum cli/uv.lock cli/src/opensandbox_cli/commands/command.py
+      - name: Install frozen CLI dependencies
+        working-directory: cli
+        run: uv sync --frozen
+      - name: Ruff and Pyright
+        working-directory: cli
+        run: |
+          uv run --frozen ruff check
+          uv run --frozen pyright
+      - name: Full CLI suite
+        working-directory: cli
+        run: |
+          mkdir -p reports
+          uv run --frozen pytest tests/ -v --junitxml=reports/junit.xml | tee reports/pytest.log
+          git diff --exit-code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr2109-linux-cli
+          path: cli/reports/
+
+  live-docker:
+    name: Real Docker sandbox CLI verification
+    needs: cli-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out validation helpers
+        uses: actions/checkout@v6
+        with:
+          path: validation
+      - name: Check out exact PR source
+        uses: actions/checkout@v6
+        with:
+          ref: 889a5e6be15ce6259332e8e04549d805ecf27a2b
+          fetch-depth: 0
+          path: source
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.12.10'
+      - name: Install source server and CLI
+        run: |
+          test "$(git -C source rev-parse HEAD)" = 889a5e6be15ce6259332e8e04549d805ecf27a2b
+          uv sync --project source/cli --frozen --python 3.11
+          uv sync --project source/server --frozen --no-dev --python 3.11
+          git -C source show c7dc78a4090e5de2b9119e9bd93952cae24f87bd:cli/src/opensandbox_cli/commands/command.py > baseline-command.py
+      - name: Build execd from the exact source commit
+        run: |
+          docker build --progress=plain -f source/components/execd/Dockerfile \
+            --build-arg GIT_COMMIT=889a5e6be15ce6259332e8e04549d805ecf27a2b \
+            -t opensandbox/execd:pr2109-test source
+          docker pull python:3.11-slim-bookworm
+      - name: Start isolated local server
+        run: |
+          source/server/.venv/bin/opensandbox-server --config validation/.validation/pr2109/server.toml > server.log 2>&1 &
+          echo "$!" > server.pid
+          source/cli/.venv/bin/python - <<'PY'
+          import time, httpx
+          for attempt in range(60):
+              try:
+                  response = httpx.get('http://127.0.0.1:18080/health', timeout=2)
+                  if response.status_code == 200:
+                      print(response.text)
+                      break
+              except httpx.HTTPError:
+                  pass
+              time.sleep(0.5)
+          else:
+              raise RuntimeError('Server did not become healthy')
+          PY
+      - name: Verify real baseline and patched CLI behavior
+        env:
+          OSB_VALIDATION_ENV: GitHub Actions Ubuntu, source-built execd and real Docker sandbox
+        run: |
+          export OSB_VALIDATION_ROOT="$GITHUB_WORKSPACE/source"
+          export OSB_BASELINE_SOURCE="$GITHUB_WORKSPACE/baseline-command.py"
+          source/cli/.venv/bin/python validation/.validation/pr2109/live-background.py | tee live-cli.log
+          git -C source diff --exit-code
+      - name: Stop test server
+        if: always()
+        run: |
+          if test -f server.pid; then kill "$(cat server.pid)" || true; fi
+          docker ps -a
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr2109-live-docker
+          path: |
+            live-cli.log
+            server.log
+            baseline-command.py
+            source/live-background-results.json

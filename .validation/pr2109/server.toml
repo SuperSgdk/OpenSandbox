@@ -1,0 +1,28 @@
+[server]
+host = "127.0.0.1"
+port = 18080
+api_key = "pr2109-local-test-only"
+max_sandbox_timeout_seconds = 1800
+
+[runtime]
+type = "docker"
+execd_image = "opensandbox/execd:pr2109-test"
+
+[store]
+type = "sqlite"
+path = "pr2109-server.db"
+
+[docker]
+network_mode = "bridge"
+publish_host = "127.0.0.1"
+port_range_min = 48000
+port_range_max = 48100
+drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
+no_new_privileges = true
+pids_limit = 512
+
+[ingress]
+mode = "direct"
+
+[proxy]
+resolve_internal = true
